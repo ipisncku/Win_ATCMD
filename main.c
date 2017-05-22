@@ -685,11 +685,9 @@ int main(void)
         printf("%s is the AT port\n", comport);
 
         /* Job you want to do... */
-
-        get_ATCMD_response(comport, "AT+CGSN", reponse, sizeof(reponse));
-        if(0 == module_unlock(comport)) {
-            printf("module unlock!\n");
-        }
+		system("start INT7160ATT-1645_tb_r9124_signed.exe");
+		Sleep(15000);
+        get_ATCMD_response(comport, "AT+CFUN=1,1", reponse, sizeof(reponse));
         /* Finish Job... */
     }
     //    fclose(logfp);
