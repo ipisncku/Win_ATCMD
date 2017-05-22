@@ -205,7 +205,7 @@ int SendAT(char *atcommands_org, unsigned char *respbuf, int respbuf_len)
         receive_try++;
         Sleep(100);
         n = RS232_PollComport2( respbuf, 1023);
-//        printf("n=%d s=%s\n",n,respbuf);
+        //        printf("n=%d s=%s\n",n,respbuf);
     } while (n == 0 && receive_try < 100);
     if (n==0){
         return -1;
@@ -241,12 +241,12 @@ int get_ATCMD_response(char *com, char *atcmd, char *response, int reponse_len)
     /*2. send AT*/
     ret = SendAT(atcmd, buf, sizeof(buf));
     if(ret == 0 && response && reponse_len > 0) {
-    	memset(response, 0, reponse_len);
-    	snprintf(response, reponse_len, &buf[2]);
-//    	sscanf(buf, "\n%[^\r\n]\n", response);
-	}
+        memset(response, 0, reponse_len);
+        strncpy(response, &buf[2], reponse_len);
+        //    	sscanf(buf, "\n%[^\r\n]\n", response);
+    }
 
-	printf("AT:%s\nresponse:%s\n", atcmd, response);
+    printf("AT:%s\nresponse:%s\n", atcmd, response);
     /*4. close port*/
     RS232_CloseComport();
 
@@ -257,32 +257,37 @@ int get_ATCMD_reponse_with_expect(char *com, char *atcmd, char *expect, char *re
 {
     if(0 == get_ATCMD_response(com, atcmd, response, reponse_len))
     {
-        return strncmp(expect, response, reponse_len);
+        return strncmp(expect, response, strlen(expect));
     }
     return -1;
 }
 
 static int check_comport(HKEY hKey, const char * reg_name, char *comport, int com_len)
 {
-	unsigned char com_port[256] = {0};
-	DWORD len_com_port = sizeof(com_port);
-	int ret = -1;
-	char response[1024];
-	
-	if (RegQueryValueEx(hKey, reg_name, 0, NULL, com_port, &len_com_port) != ERROR_SUCCESS)
-	{
-		printf("No AT port found\n");
-		return 1;
-	}
-		
-	if(0 == get_ATCMD_response(com_port, "AT", response, sizeof(response))) {
-		strncpy(comport, com_port, com_len);
-		ret = 0;
-	}
-	else
-		ret = -1;
-	
-	return ret;
+    unsigned char com_port[256] = {0};
+    DWORD len_com_port = sizeof(com_port);
+    int ret = -1;
+    char response[1024];
+    char model[50];
+
+    if (RegQueryValueEx(hKey, reg_name, 0, NULL, com_port, &len_com_port) != ERROR_SUCCESS)
+    {
+        printf("No AT port found\n");
+        return 1;
+    }
+
+    snprintf(model, sizeof(model), "HL7588");
+
+    if(0 == get_ATCMD_response(com_port, "AT", response, sizeof(response))
+            && 0 == get_ATCMD_response(com_port, "ATE0", response, sizeof(response))
+            && 0 == get_ATCMD_reponse_with_expect(com_port, "ATI", model, response, sizeof(response))) {
+        strncpy(comport, com_port, com_len);
+        ret = 0;
+    }
+    else
+        ret = -1;
+
+    return ret;
 }
 
 //int atmode_EnumSerialComm()
@@ -401,9 +406,14 @@ int main(void)
 
     if(0 == search_modem(comport, sizeof(comport)))
     {
-    	printf("%s is the AT port\n", comport);
+        printf("%s is the AT port\n", comport);
+
+        /* Job you want to do... */
+
         get_ATCMD_response(comport, "AT+CGSN", reponse, sizeof(reponse));
         get_ATCMD_response(comport, "AT+CSQ", reponse, sizeof(reponse));
+
+        /* Finish Job... */
     }
     fclose(logfp);
     return 0;
