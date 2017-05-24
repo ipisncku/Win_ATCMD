@@ -17,6 +17,11 @@ int cport_nr=0;
 char firmware_version[20];
 FILE* logfp=NULL;
 
+typedef unsigned char     uint8_t;
+typedef unsigned short    uint16_t;
+typedef unsigned int      uint32_t;
+typedef unsigned long int uint64_t;
+
 void print_log(FILE* fp, const char *fmt, ...){
     char msg[1024];
     va_list marker;
@@ -244,13 +249,17 @@ int get_ATCMD_response(char *com, char *atcmd, char *response, int reponse_len)
         memset(response, 0, reponse_len);
         strncpy(response, &buf[2], reponse_len);
         //    	sscanf(buf, "\n%[^\r\n]\n", response);
+        if(strstr(response, "OK\r\n"))
+            ret = 0;
+        else
+            ret = -1;
     }
 
     printf("AT:%s\nresponse:%s\n", atcmd, response);
     /*4. close port*/
     RS232_CloseComport();
 
-    return 0;
+    return ret;
 }
 
 int get_ATCMD_reponse_with_expect(char *com, char *atcmd, char *expect, char *response, int reponse_len)
@@ -264,30 +273,297 @@ int get_ATCMD_reponse_with_expect(char *com, char *atcmd, char *expect, char *re
 
 static int check_comport(HKEY hKey, const char * reg_name, char *comport, int com_len)
 {
-    unsigned char com_port[256] = {0};
-    DWORD len_com_port = sizeof(com_port);
+    unsigned char _com_port[256] = {0};
+    DWORD len_com_port = sizeof(_com_port);
     int ret = -1;
     char response[1024];
     char model[50];
 
-    if (RegQueryValueEx(hKey, reg_name, 0, NULL, com_port, &len_com_port) != ERROR_SUCCESS)
+    if (RegQueryValueEx(hKey, reg_name, 0, NULL, _com_port, &len_com_port) != ERROR_SUCCESS)
     {
         printf("No AT port found\n");
         return 1;
     }
 
-    snprintf(model, sizeof(model), "HL7588");
+    snprintf(model, sizeof(model), "MC7354");
 
-    if(0 == get_ATCMD_response(com_port, "AT", response, sizeof(response))
-            && 0 == get_ATCMD_response(com_port, "ATE0", response, sizeof(response))
-            && 0 == get_ATCMD_reponse_with_expect(com_port, "ATI", model, response, sizeof(response))) {
-        strncpy(comport, com_port, com_len);
+    if(0 == get_ATCMD_response(_com_port, "AT", response, sizeof(response))
+            && 0 == get_ATCMD_response(_com_port, "ATE0", response, sizeof(response))
+            && 0 == get_ATCMD_reponse_with_expect(_com_port, "AT+CGMM", model, response, sizeof(response))) {
+        strncpy(comport, _com_port, com_len);
         ret = 0;
     }
     else
         ret = -1;
 
     return ret;
+}
+
+uint8_t tbl47BDE8[0x105]={0};
+
+uint32_t SierraCalc1(uint32_t counter, uint8_t* prodkey, uint32_t intval, uint8_t *challengelen, uint32_t *mcount)
+{
+    uint32_t i;
+    uint32_t tmp2;
+
+    int tmp1;
+    int tmp3;
+
+    if ( counter )
+    {
+        tmp2 = 0;
+        for ( i = 1; i < counter; i = 2 * i + 1 );
+        do
+        {
+            tmp1 = (*mcount)++;
+            *challengelen = (prodkey[tmp1] + tbl47BDE8[*challengelen+5])&0xFF;
+            if ( *mcount >= intval )
+            {
+                *mcount = 0;
+                *challengelen += intval;
+            }
+            tmp3 = (*challengelen & i)&0xFF;
+            tmp2++;
+            if ( tmp2 > 0xB )
+                //div(counter, tmp3); // Careful, that was in arm firmware
+                tmp3 %= counter; //In new algo ...weird, results are the same
+        }
+        while ( (uint32_t)tmp3 > (uint32_t)counter );
+        counter = (uint8_t)tmp3;
+    }
+    return counter;
+}
+
+int SierraCalcV2(uint8_t challenge)
+{
+    int v2; // r0@1
+    int v3; // r4@1
+    int v4; // r2@1
+    int v5; // r5@1
+    int v6; // r3@1
+    int v7; // r6@1
+    int v8; // r0@1
+    int result; // r0@1
+
+    v2 = tbl47BDE8[0];
+    v3 = (tbl47BDE8[0]+1) & 0xFF;
+    tbl47BDE8[0] = tbl47BDE8[0]++;
+    v4 = (tbl47BDE8[v2+5] + tbl47BDE8[1]) & 0xFF;
+    tbl47BDE8[1] += tbl47BDE8[v2+5];
+    v5 = tbl47BDE8[4];
+    v6 = tbl47BDE8[tbl47BDE8[4]+5];
+    tbl47BDE8[v5+5] = tbl47BDE8[v4+5];
+    v7 = tbl47BDE8[3];
+    tbl47BDE8[v4+5] = tbl47BDE8[tbl47BDE8[3]+5];
+    tbl47BDE8[v7+5] = tbl47BDE8[v3+5];
+    tbl47BDE8[v3+5] = v6;
+    v8 = (tbl47BDE8[v6+5] + tbl47BDE8[2])& 0xFF;
+    tbl47BDE8[2] += tbl47BDE8[v6+5];
+    int v=((tbl47BDE8[v7+5] + tbl47BDE8[v5+5] + tbl47BDE8[v8+5]) & 0xFF);
+    int tmm=tbl47BDE8[v+5];
+    int u=(tbl47BDE8[v4+5] + v6) & 0xFF;
+    result = tbl47BDE8[tmm+5] ^ tbl47BDE8[u+5] ^ challenge;
+    tbl47BDE8[3] = result;
+    tbl47BDE8[4] = challenge;
+    return result;
+}
+
+int SierraInitV2(uint8_t* prodkey, uint32_t intval, uint32_t *mcount, uint8_t *challengelen)
+{
+
+    int result=0;
+    int i=0;
+
+    if ( intval >= 1 && intval <= 0x20 )
+    {
+        for (i=0;i<0x100;i++)
+        {
+            tbl47BDE8[i+5] = (uint8_t)i;
+        }
+        *mcount = 0;
+
+        *challengelen=00;
+
+        for (i=0xFF;i>=0;i--)
+        {
+            uint8_t t= SierraCalc1(i, prodkey, intval, challengelen, mcount);
+            uint8_t m = tbl47BDE8[i+5];
+            tbl47BDE8[i+5] = tbl47BDE8[t+5];
+            tbl47BDE8[t+5] = m;
+        }
+
+        tbl47BDE8[0]=(uint8_t)tbl47BDE8[6]; //old algo
+        tbl47BDE8[1]=(uint8_t)tbl47BDE8[8];
+        tbl47BDE8[2]=(uint8_t)tbl47BDE8[0xA];
+        tbl47BDE8[3]=(uint8_t)tbl47BDE8[0xC];
+        tbl47BDE8[4]=(uint8_t)tbl47BDE8[*challengelen+5];
+
+        *mcount = 0;
+        result = 1;
+    }
+    else
+    {
+        result = 0;
+    }
+    return result;
+
+}
+
+int SierraCalcV3(uint8_t challenge)
+{
+    int v2; // r0@1
+    int v3; // r4@1
+    int v4; // r2@1
+    int v5; // r5@1
+    int v6; // r3@1
+    int v7; // r6@1
+    int result; // r0@1
+
+    int v1 = tbl47BDE8[3];
+    v3 = (uint8_t)tbl47BDE8[2];
+    v4 = tbl47BDE8[(uint8_t)tbl47BDE8[2]+5];
+    tbl47BDE8[1] += tbl47BDE8[(uint8_t)tbl47BDE8[3]+5];
+    v2 = tbl47BDE8[1];
+    tbl47BDE8[(uint8_t)tbl47BDE8[2]+5] = tbl47BDE8[(uint8_t)tbl47BDE8[1]+5];
+    ++v1;
+    v5 = (uint8_t)tbl47BDE8[0];
+    tbl47BDE8[(uint8_t)v2+5] = tbl47BDE8[(uint8_t)tbl47BDE8[0]+5];
+    v6 = (uint8_t)v1;
+    tbl47BDE8[3] = v1;
+    tbl47BDE8[v5+5] = tbl47BDE8[(uint8_t)v1+5];
+    v7 = tbl47BDE8[4];
+    tbl47BDE8[v6+5] = v4;
+    v3 = tbl47BDE8[v3+5];
+    tbl47BDE8[4] = tbl47BDE8[(uint8_t)v4+5] + v7;
+    result = challenge ^ tbl47BDE8[(uint8_t)(v4 + tbl47BDE8[(uint8_t)v2+5])+5] ^ tbl47BDE8[(uint8_t)tbl47BDE8[(uint8_t)((uint8_t)v3 + tbl47BDE8[v5+5] + tbl47BDE8[(uint8_t)tbl47BDE8[4]+5])+5]+5];
+    tbl47BDE8[2] = result;
+    tbl47BDE8[0] = challenge;
+
+    return result;
+}
+
+int SierraInitV3(uint8_t* prodkey, uint32_t intval, uint32_t *mcount, uint8_t *challengelen)
+{
+    int result=0;
+    int i=0;
+
+
+    if ( intval >= 1 && intval <= 0x20 )
+    {
+        for (i=0;i<0x100;i++)
+        {
+            tbl47BDE8[i+5] = (uint8_t)i;
+        }
+        *mcount = 0;
+        *challengelen=00;
+
+        for (i=0xFF;i>=0;i--)
+        {
+            uint8_t t= SierraCalc1(i, prodkey, intval, challengelen, mcount);
+            uint8_t m = tbl47BDE8[i+5];
+            tbl47BDE8[i+5] = tbl47BDE8[t+5];
+            tbl47BDE8[t+5] = m;
+        }
+
+        tbl47BDE8[3]=(uint8_t)tbl47BDE8[6]; //new algo
+        tbl47BDE8[1]=(uint8_t)tbl47BDE8[8];
+        tbl47BDE8[4]=(uint8_t)tbl47BDE8[0xA];
+        tbl47BDE8[0]=(uint8_t)tbl47BDE8[0xC];
+        tbl47BDE8[2]=(uint8_t)tbl47BDE8[*challengelen+5];
+
+        *mcount = 0;
+        result = 1;
+    }
+    else
+    {
+        result = 0;
+    }
+    return result;
+}
+
+uint8_t *SierraFinish()
+{
+    uint8_t *result;
+    int i=0;
+    for (i=0;i<256;i++)
+        tbl47BDE8[i + 5] = 0;
+
+    result = tbl47BDE8;
+    tbl47BDE8[4] = 0;
+    tbl47BDE8[3] = 0;
+    tbl47BDE8[2] = 0;
+    tbl47BDE8[1] = 0;
+    tbl47BDE8[0] = 0;
+    return result;
+}
+
+unsigned char* SierraKeygen(unsigned char* challenge, unsigned char* prodtable, unsigned char challengelen, unsigned int mcount, int mode)
+{
+    int result;
+    int i=0;
+    unsigned char* resultbuffer=(unsigned char*)malloc(challengelen);
+
+    if (mode==2)  result = SierraInitV2(prodtable, (unsigned char)mcount, &mcount, &challengelen);
+    else if (mode==3) result = SierraInitV3(prodtable, (unsigned char)mcount, &mcount, &challengelen);
+
+    if ( result )
+    {
+        for ( i = 0; i < challengelen; i++ )
+        {
+            if (mode==2) resultbuffer[i] = SierraCalcV2(challenge[i]);
+            else if (mode==3) resultbuffer[i] = SierraCalcV3(challenge[i]);
+        }
+        SierraFinish();
+        result = 1;
+    }
+
+    return resultbuffer;
+}
+
+int module_unlock(char *comport)
+{
+    char response[1024];
+    char _challenge[64];
+    char challengearray[8]={0};
+    int i = 0;
+    unsigned char *resultbuffer=NULL;   // Needs to be free.
+    char unlock_cmd[256];
+
+    get_ATCMD_response(comport, "AT!ENTERCND=\"A710\"", response, sizeof(response));
+    get_ATCMD_response(comport, "AT!OPENLOCK?", response, sizeof(response));
+    memset(&_challenge, 0, sizeof(_challenge));
+    sscanf(response, "%[^\r\n]\n", _challenge);
+
+    for (i=0;i<8;i++) {
+        char stringDst[3]={0};
+        strncpy(stringDst, _challenge + i*2, 2);
+        challengearray[i]=(unsigned char)strtol(stringDst, NULL, 16);
+        //printf("%02X\r\n", challengearray[i]);
+    }
+
+    unsigned char prodkey[]=
+    {
+            0xF0, 0x14, 0x55, 0x0D, 0x5E, 0xDA, 0x92, 0xB3, 0xA7, 0x6C, 0xCE, 0x84, 0x90, 0xBC, 0x7F, 0xED,//MC8775_H2.0.8.19 !OPENLOCK, !OPENCNT .. MC8765V,MC8765,MC8755V,MC8775,MC8775V,MC8775,AC850,AC860,AC875,AC881,AC881U,AC875
+            0x22, 0x63, 0x48, 0x02, 0x24, 0x72, 0x27, 0x37, 0x10, 0x26, 0x37, 0x50, 0xBE, 0xEF, 0xCA, 0xFE,//MC8775_H2.0.8.19
+            0x61, 0x94, 0xCE, 0xA7, 0xB0, 0xEA, 0x4F, 0x0A, 0x73, 0xC5, 0xC3, 0xA6, 0x5E, 0xEC, 0x1C, 0xE2,//MC8775_H2.0.8.19 !OPENMEP
+            0x39, 0xC6, 0x7B, 0x04, 0xCA, 0x50, 0x82, 0x1F, 0x19, 0x63, 0x36, 0xDE, 0x81, 0x49, 0xF0, 0xD7, //AC750,AC710,AC7XX,SB750A,SB750,PC7000,AC313u
+            0xDE, 0xA5, 0xAD, 0x2E, 0xBE, 0xE1, 0xC9, 0xEF, 0xCA, 0xF9, 0xFE, 0x1F, 0x17, 0xFE, 0xED, 0x3B, //AC775,PC7200
+            0x95, 0xA1, 0x02, 0x77, 0xCC, 0x34, 0x12, 0x3C, 0x17, 0x29, 0xAE, 0x91, 0x66, 0xCE, 0x75, 0xA5,
+            0x61, 0x94, 0xCE, 0xA7, 0xB0, 0xEA, 0x4F, 0x0A, 0x73, 0xC5, 0xC3, 0xA6, 0x5E, 0xEC, 0x1C, 0xE2
+    };
+
+    resultbuffer = SierraKeygen(challengearray, &prodkey[0], sizeof(challengearray), 16, 3); // mode = 3
+
+    if(resultbuffer) {
+        snprintf(unlock_cmd, sizeof(unlock_cmd), "AT!OPENLOCK=\"%02X%02X%02X%02X%02X%02X%02X%02X\"",
+                resultbuffer[0], resultbuffer[1], resultbuffer[2], resultbuffer[3],
+                resultbuffer[4], resultbuffer[5], resultbuffer[6], resultbuffer[7]);
+        printf("%s\n", unlock_cmd);
+        //        free(resultbuffer);
+        return get_ATCMD_response(comport, unlock_cmd, response, sizeof(response));
+    }
+
+    return -1;
 }
 
 //int atmode_EnumSerialComm()
@@ -411,10 +687,12 @@ int main(void)
         /* Job you want to do... */
 
         get_ATCMD_response(comport, "AT+CGSN", reponse, sizeof(reponse));
-        get_ATCMD_response(comport, "AT+CSQ", reponse, sizeof(reponse));
-
+        if(0 == module_unlock(comport)) {
+            printf("module unlock!\n");
+        }
         /* Finish Job... */
     }
-    fclose(logfp);
+    //    fclose(logfp);
+    system("PAUSE");
     return 0;
 }
