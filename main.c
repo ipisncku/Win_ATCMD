@@ -9,6 +9,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <malloc.h>
+#include <stdlib.h>
 
 HANDLE Cport;
 char 	DateString[32]="";
@@ -255,7 +257,7 @@ int get_ATCMD_response(char *com, char *atcmd, char *response, int reponse_len)
             ret = -1;
     }
 
-    printf("AT:%s\nresponse:%s\n", atcmd, response);
+    printf("CMD:%s\nRET:%s\n", atcmd, response);
     /*4. close port*/
     RS232_CloseComport();
 
@@ -284,6 +286,8 @@ static int check_comport(HKEY hKey, const char * reg_name, char *comport, int co
         printf("No AT port found\n");
         return 1;
     }
+
+    printf("Checking %s...\n", _com_port);
 
     snprintf(model, sizeof(model), "MC7354");
 
@@ -501,10 +505,18 @@ unsigned char* SierraKeygen(unsigned char* challenge, unsigned char* prodtable, 
 {
     int result;
     int i=0;
-    unsigned char* resultbuffer=(unsigned char*)malloc(challengelen);
+    unsigned char* resultbuffer= NULL;
+    unsigned char *renewal_challenge = NULL;
+    unsigned char _challengelen = challengelen;
 
-    if (mode==2)  result = SierraInitV2(prodtable, (unsigned char)mcount, &mcount, &challengelen);
-    else if (mode==3) result = SierraInitV3(prodtable, (unsigned char)mcount, &mcount, &challengelen);
+    if (mode==2)  result = SierraInitV2(prodtable, (unsigned char)mcount, &mcount, &_challengelen);
+    else if (mode==3) result = SierraInitV3(prodtable, (unsigned char)mcount, &mcount, &_challengelen);
+
+	resultbuffer = (unsigned char*)malloc(_challengelen);   // Needs to be free.
+	renewal_challenge = (unsigned char*)malloc(_challengelen);
+	memset(renewal_challenge, 0, _challengelen);
+
+	memcpy(renewal_challenge, challenge, sizeof(challengelen));
 
     if ( result )
     {
@@ -516,23 +528,26 @@ unsigned char* SierraKeygen(unsigned char* challenge, unsigned char* prodtable, 
         SierraFinish();
         result = 1;
     }
-
+    free(renewal_challenge);
     return resultbuffer;
 }
 
+/* For MC73 ONLY */
 int module_unlock(char *comport)
 {
     char response[1024];
     char _challenge[64];
     char challengearray[8]={0};
     int i = 0;
-    unsigned char *resultbuffer=NULL;   // Needs to be free.
+    unsigned char *resultbuffer = NULL;   // Needs to be free.
     char unlock_cmd[256];
+    
 
     get_ATCMD_response(comport, "AT!ENTERCND=\"A710\"", response, sizeof(response));
     get_ATCMD_response(comport, "AT!OPENLOCK?", response, sizeof(response));
     memset(&_challenge, 0, sizeof(_challenge));
     sscanf(response, "%[^\r\n]\n", _challenge);
+//	sprintf(_challenge, "1234567890123456");
 
     for (i=0;i<8;i++) {
         char stringDst[3]={0};
@@ -558,9 +573,8 @@ int module_unlock(char *comport)
         snprintf(unlock_cmd, sizeof(unlock_cmd), "AT!OPENLOCK=\"%02X%02X%02X%02X%02X%02X%02X%02X\"",
                 resultbuffer[0], resultbuffer[1], resultbuffer[2], resultbuffer[3],
                 resultbuffer[4], resultbuffer[5], resultbuffer[6], resultbuffer[7]);
-        printf("%s\n", unlock_cmd);
-        //        free(resultbuffer);
-        return get_ATCMD_response(comport, unlock_cmd, response, sizeof(response));
+        free(resultbuffer);
+        return get_ATCMD_response(comport, unlock_cmd, response, sizeof(response));    
     }
 
     return -1;
@@ -675,7 +689,7 @@ int search_modem(char *com, int com_len)
     return -1;
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     char comport[256];
     char reponse[1024];
@@ -688,10 +702,11 @@ int main(void)
 
         get_ATCMD_response(comport, "AT+CGSN", reponse, sizeof(reponse));
         if(0 == module_unlock(comport)) {
-            printf("module unlock!\n");
+            printf("module unlocked!\n");
         }
         /* Finish Job... */
     }
+    printf("finish\n");
     //    fclose(logfp);
     system("PAUSE");
     return 0;
